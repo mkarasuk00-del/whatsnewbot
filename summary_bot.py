@@ -5,6 +5,7 @@ from pathlib import Path
 
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
+from telethon.tl.custom import Button
 import anthropic
 from dotenv import load_dotenv
 import os
@@ -18,7 +19,6 @@ print(f"SESSION_STRING длина: {len(session_string)} символов")
 if len(session_string) < 100:
     print("ОШИБКА: TG_SESSION_STRING слишком короткая или пустая!")
 
-# Читает каналы от имени твоего аккаунта
 client = TelegramClient(
     StringSession(session_string),
     int(os.getenv("TG_API_ID")),
@@ -30,6 +30,9 @@ claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 BASE_DIR = Path(__file__).parent
 LAST_RUN_FILE = BASE_DIR / "last_run.json"
 CHANNELS_FILE = BASE_DIR / "channels.json"
+
+# Состояние ожидания ввода от пользователя
+waiting_for = {}
 
 
 # --- Управление каналами ---
@@ -104,7 +107,6 @@ async def build_digest(since: datetime = None) -> str | None:
     print(f"Итого постов: {len(all_posts)}")
 
     if not all_posts:
-        print("Новых постов нет")
         save_last_run()
         return None
 
@@ -134,6 +136,16 @@ async def build_digest(since: datetime = None) -> str | None:
     return response.content[0].text
 
 
+# --- Главное меню ---
+
+def main_menu():
+    return [
+        [Button.inline("📋 Дайджест", b"digest")],
+        [Button.inline("➕ Добавить канал", b"add"), Button.inline("➖ Удалить канал", b"remove")],
+        [Button.inline("📌 Мои каналы", b"list")],
+    ]
+
+
 # --- Бот ---
 
 async def main():
@@ -148,48 +160,87 @@ async def main():
 
     your_id = int(os.getenv("TG_YOUR_ID"))
 
-    @bot.on(events.NewMessage(pattern="/digest", from_users=your_id))
-    async def handle_digest(event):
-        await bot.send_message(your_id, "⏳ Собираю дайджест...")
-        digest = await build_digest()
-        if digest:
-            await bot.send_message(your_id, digest, parse_mode='html', link_preview=False)
-            print("Дайджест отправлен")
-        else:
-            await bot.send_message(your_id, "Новых постов нет.")
+    # /start — показывает меню с кнопками
+    @bot.on(events.NewMessage(pattern="/start", from_users=your_id))
+    async def handle_start(event):
+        await bot.send_message(
+            your_id,
+            "Привет! Выбери действие:",
+            buttons=main_menu()
+        )
 
-    @bot.on(events.NewMessage(pattern=r"/add (.+)", from_users=your_id))
-    async def handle_add(event):
-        channel = event.pattern_match.group(1).strip()
-        channels = load_channels()
-        if channel in channels:
-            await bot.send_message(your_id, f"Канал {channel} уже есть в списке.")
+    # Обработка текстовых сообщений (для добавления канала)
+    @bot.on(events.NewMessage(from_users=your_id))
+    async def handle_text(event):
+        if event.text.startswith("/"):
             return
-        channels.append(channel)
-        save_channels(channels)
-        await bot.send_message(your_id, f"✅ Канал {channel} добавлен.")
+        state = waiting_for.get(your_id)
+        if state == "add":
+            channel = event.text.strip()
+            channels = load_channels()
+            if channel in channels:
+                await bot.send_message(your_id, f"Канал {channel} уже есть в списке.", buttons=main_menu())
+            else:
+                channels.append(channel)
+                save_channels(channels)
+                await bot.send_message(your_id, f"✅ Канал {channel} добавлен.", buttons=main_menu())
+            waiting_for.pop(your_id, None)
 
-    @bot.on(events.NewMessage(pattern=r"/remove (.+)", from_users=your_id))
-    async def handle_remove(event):
-        channel = event.pattern_match.group(1).strip()
-        channels = load_channels()
-        if channel not in channels:
-            await bot.send_message(your_id, f"Канал {channel} не найден в списке.")
-            return
-        channels.remove(channel)
-        save_channels(channels)
-        await bot.send_message(your_id, f"🗑 Канал {channel} удалён.")
+    # Обработка нажатий на кнопки
+    @bot.on(events.CallbackQuery(from_users=your_id))
+    async def handle_callback(event):
+        data = event.data
 
-    @bot.on(events.NewMessage(pattern="/list", from_users=your_id))
-    async def handle_list(event):
-        channels = load_channels()
-        if not channels:
-            await bot.send_message(your_id, "Список каналов пуст.")
-            return
-        text = "📋 Каналы в списке:\n" + "\n".join(f"• {ch}" for ch in channels)
-        await bot.send_message(your_id, text)
+        if data == b"digest":
+            await event.answer("Собираю дайджест...")
+            await bot.send_message(your_id, "⏳ Собираю дайджест...")
+            digest = await build_digest()
+            if digest:
+                await bot.send_message(your_id, digest, parse_mode='html', link_preview=False, buttons=main_menu())
+            else:
+                await bot.send_message(your_id, "Новых постов нет.", buttons=main_menu())
 
-    print("Бот запущен. Команды: /digest, /add @channel, /remove @channel, /list")
+        elif data == b"add":
+            await event.answer()
+            waiting_for[your_id] = "add"
+            await bot.send_message(your_id, "Напиши @username канала который хочешь добавить:")
+
+        elif data == b"list":
+            await event.answer()
+            channels = load_channels()
+            if not channels:
+                await bot.send_message(your_id, "Список каналов пуст.", buttons=main_menu())
+            else:
+                text = "📌 Мои каналы:\n" + "\n".join(f"• {ch}" for ch in channels)
+                await bot.send_message(your_id, text, buttons=main_menu())
+
+        elif data == b"remove":
+            await event.answer()
+            channels = load_channels()
+            if not channels:
+                await bot.send_message(your_id, "Список каналов пуст.", buttons=main_menu())
+                return
+            # Показываем каждый канал как кнопку для удаления
+            buttons = [[Button.inline(f"🗑 {ch}", f"del:{ch}".encode())] for ch in channels]
+            buttons.append([Button.inline("« Назад", b"back")])
+            await bot.send_message(your_id, "Выбери канал для удаления:", buttons=buttons)
+
+        elif data.startswith(b"del:"):
+            channel = data[4:].decode()
+            channels = load_channels()
+            if channel in channels:
+                channels.remove(channel)
+                save_channels(channels)
+                await event.answer(f"Удалён: {channel}")
+                await bot.send_message(your_id, f"🗑 Канал {channel} удалён.", buttons=main_menu())
+            else:
+                await event.answer("Канал не найден")
+
+        elif data == b"back":
+            await event.answer()
+            await bot.send_message(your_id, "Выбери действие:", buttons=main_menu())
+
+    print("Бот запущен.")
     await bot.run_until_disconnected()
 
 
