@@ -1,0 +1,5 @@
+.env
+*.session
+last_run.json
+channels.json
+__pycache__/
