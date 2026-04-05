@@ -13,9 +13,14 @@ from config import CHANNELS, DEFAULT_HOURS_BACK, SUMMARY_PROMPT
 
 load_dotenv()
 
+session_string = os.getenv("TG_SESSION_STRING", "")
+print(f"SESSION_STRING длина: {len(session_string)} символов")
+if len(session_string) < 100:
+    print("ОШИБКА: TG_SESSION_STRING слишком короткая или пустая!")
+
 # Читает каналы от имени твоего аккаунта
 client = TelegramClient(
-    StringSession(os.getenv("TG_SESSION_STRING", "")),
+    StringSession(session_string),
     int(os.getenv("TG_API_ID")),
     os.getenv("TG_API_HASH")
 )
