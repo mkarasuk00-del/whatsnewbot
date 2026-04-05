@@ -22,8 +22,9 @@ client = TelegramClient(
 
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-LAST_RUN_FILE = Path("~/tg_digest/last_run.json").expanduser()
-CHANNELS_FILE = Path("~/tg_digest/channels.json").expanduser()
+BASE_DIR = Path(__file__).parent
+LAST_RUN_FILE = BASE_DIR / "last_run.json"
+CHANNELS_FILE = BASE_DIR / "channels.json"
 
 
 # --- Управление каналами ---
