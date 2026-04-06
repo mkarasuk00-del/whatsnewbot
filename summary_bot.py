@@ -250,7 +250,11 @@ async def handle_callback(call: CallbackQuery):
 
 async def main():
     await client.start()
-    print("Telethon клиент запущен.")
+    me = await client.get_me()
+    if me is None:
+        print("ОШИБКА: Telethon не авторизован!")
+    else:
+        print(f"Telethon залогинен как: {me.first_name} {me.last_name or ''}, bot={me.bot}, id={me.id}")
     print("Бот запущен.")
     await dp.start_polling(bot)
 
