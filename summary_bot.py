@@ -187,8 +187,10 @@ async def main():
             waiting_for.pop(your_id, None)
 
     # Обработка нажатий на кнопки
-    @bot.on(events.CallbackQuery(from_users=your_id))
+    @bot.on(events.CallbackQuery())
     async def handle_callback(event):
+        if event.sender_id != your_id:
+            return
         data = event.data
 
         if data == b"digest":
