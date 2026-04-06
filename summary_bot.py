@@ -6,6 +6,7 @@ from pathlib import Path
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.custom import Button
+from telethon.errors import FloodWaitError
 import anthropic
 from dotenv import load_dotenv
 import os
@@ -151,12 +152,18 @@ def main_menu():
 async def main():
     await client.start()
 
+    bot_session = os.getenv("TG_BOT_SESSION_STRING", "")
     bot = TelegramClient(
-        StringSession(),
+        StringSession(bot_session),
         int(os.getenv("TG_API_ID")),
         os.getenv("TG_API_HASH")
     )
-    await bot.start(bot_token=os.getenv("TG_BOT_TOKEN"))
+    try:
+        await bot.start(bot_token=os.getenv("TG_BOT_TOKEN"))
+    except FloodWaitError as e:
+        print(f"FloodWait: жду {e.seconds} секунд...")
+        await asyncio.sleep(e.seconds)
+        await bot.start(bot_token=os.getenv("TG_BOT_TOKEN"))
 
     your_id = int(os.getenv("TG_YOUR_ID"))
 
