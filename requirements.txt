@@ -1,3 +1,4 @@
 telethon
 anthropic
 python-dotenv
+aiogram

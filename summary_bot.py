@@ -3,10 +3,14 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient
 from telethon.sessions import StringSession
-from telethon.tl.custom import Button
-from telethon.errors import FloodWaitError
+from aiogram import Bot, Dispatcher
+from aiogram.filters import Command
+from aiogram.types import (
+    Message, CallbackQuery,
+    InlineKeyboardMarkup, InlineKeyboardButton
+)
 import anthropic
 from dotenv import load_dotenv
 import os
@@ -15,10 +19,9 @@ from config import CHANNELS, DEFAULT_HOURS_BACK, SUMMARY_PROMPT
 
 load_dotenv()
 
+# Telethon — только для чтения каналов
 session_string = os.getenv("TG_SESSION_STRING", "")
 print(f"SESSION_STRING длина: {len(session_string)} символов")
-if len(session_string) < 100:
-    print("ОШИБКА: TG_SESSION_STRING слишком короткая или пустая!")
 
 client = TelegramClient(
     StringSession(session_string),
@@ -26,13 +29,17 @@ client = TelegramClient(
     os.getenv("TG_API_HASH")
 )
 
+# Aiogram — для бота (без сессий, без FloodWait)
+bot = Bot(token=os.getenv("TG_BOT_TOKEN"))
+dp = Dispatcher()
+
 claude = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
 BASE_DIR = Path(__file__).parent
 LAST_RUN_FILE = BASE_DIR / "last_run.json"
 CHANNELS_FILE = BASE_DIR / "channels.json"
 
-# Состояние ожидания ввода от пользователя
+YOUR_ID = int(os.getenv("TG_YOUR_ID"))
 waiting_for = {}
 
 
@@ -137,120 +144,115 @@ async def build_digest(since: datetime = None) -> str | None:
     return response.content[0].text
 
 
-# --- Главное меню ---
+# --- Клавиатура ---
 
-def main_menu():
-    return [
-        [Button.inline("📋 Дайджест", b"digest")],
-        [Button.inline("➕ Добавить канал", b"add"), Button.inline("➖ Удалить канал", b"remove")],
-        [Button.inline("📌 Мои каналы", b"list")],
-    ]
+def main_menu() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📋 Дайджест", callback_data="digest")],
+        [
+            InlineKeyboardButton(text="➕ Добавить канал", callback_data="add"),
+            InlineKeyboardButton(text="➖ Удалить канал", callback_data="remove"),
+        ],
+        [InlineKeyboardButton(text="📌 Мои каналы", callback_data="list")],
+    ])
 
 
-# --- Бот ---
+# --- Обработчики команд ---
+
+@dp.message(Command("start"))
+async def handle_start(message: Message):
+    if message.from_user.id != YOUR_ID:
+        return
+    await message.answer("Привет! Выбери действие:", reply_markup=main_menu())
+
+
+@dp.message()
+async def handle_text(message: Message):
+    if message.from_user.id != YOUR_ID:
+        return
+    if waiting_for.get(YOUR_ID) == "add":
+        channel = message.text.strip()
+        channels = load_channels()
+        if channel in channels:
+            await message.answer(f"Канал {channel} уже есть в списке.", reply_markup=main_menu())
+        else:
+            channels.append(channel)
+            save_channels(channels)
+            await message.answer(f"✅ Канал {channel} добавлен.", reply_markup=main_menu())
+        waiting_for.pop(YOUR_ID, None)
+
+
+# --- Обработчики кнопок ---
+
+@dp.callback_query()
+async def handle_callback(call: CallbackQuery):
+    if call.from_user.id != YOUR_ID:
+        return
+
+    data = call.data
+
+    if data == "digest":
+        await call.answer("Собираю дайджест...")
+        await bot.send_message(YOUR_ID, "⏳ Собираю дайджест...")
+        digest = await build_digest()
+        if digest:
+            await bot.send_message(YOUR_ID, digest, parse_mode="HTML",
+                                   disable_web_page_preview=True,
+                                   reply_markup=main_menu())
+        else:
+            await bot.send_message(YOUR_ID, "Новых постов нет.", reply_markup=main_menu())
+
+    elif data == "add":
+        await call.answer()
+        waiting_for[YOUR_ID] = "add"
+        await bot.send_message(YOUR_ID, "Напиши @username канала который хочешь добавить:")
+
+    elif data == "list":
+        await call.answer()
+        channels = load_channels()
+        if not channels:
+            await bot.send_message(YOUR_ID, "Список каналов пуст.", reply_markup=main_menu())
+        else:
+            text = "📌 Мои каналы:\n" + "\n".join(f"• {ch}" for ch in channels)
+            await bot.send_message(YOUR_ID, text, reply_markup=main_menu())
+
+    elif data == "remove":
+        await call.answer()
+        channels = load_channels()
+        if not channels:
+            await bot.send_message(YOUR_ID, "Список каналов пуст.", reply_markup=main_menu())
+            return
+        buttons = [
+            [InlineKeyboardButton(text=f"🗑 {ch}", callback_data=f"del:{ch}")]
+            for ch in channels
+        ]
+        buttons.append([InlineKeyboardButton(text="« Назад", callback_data="back")])
+        await bot.send_message(YOUR_ID, "Выбери канал для удаления:",
+                               reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons))
+
+    elif data.startswith("del:"):
+        channel = data[4:]
+        channels = load_channels()
+        if channel in channels:
+            channels.remove(channel)
+            save_channels(channels)
+            await call.answer(f"Удалён: {channel}")
+            await bot.send_message(YOUR_ID, f"🗑 Канал {channel} удалён.", reply_markup=main_menu())
+        else:
+            await call.answer("Канал не найден")
+
+    elif data == "back":
+        await call.answer()
+        await bot.send_message(YOUR_ID, "Выбери действие:", reply_markup=main_menu())
+
+
+# --- Запуск ---
 
 async def main():
     await client.start()
-
-    bot_session = os.getenv("TG_BOT_SESSION_STRING", "")
-    bot = TelegramClient(
-        StringSession(bot_session),
-        int(os.getenv("TG_API_ID")),
-        os.getenv("TG_API_HASH")
-    )
-    try:
-        await bot.start(bot_token=os.getenv("TG_BOT_TOKEN"))
-    except FloodWaitError as e:
-        print(f"FloodWait: жду {e.seconds} секунд...")
-        await asyncio.sleep(e.seconds)
-        await bot.start(bot_token=os.getenv("TG_BOT_TOKEN"))
-
-    your_id = int(os.getenv("TG_YOUR_ID"))
-
-    # /start — показывает меню с кнопками
-    @bot.on(events.NewMessage(pattern="/start", from_users=your_id))
-    async def handle_start(event):
-        await bot.send_message(
-            your_id,
-            "Привет! Выбери действие:",
-            buttons=main_menu()
-        )
-
-    # Обработка текстовых сообщений (для добавления канала)
-    @bot.on(events.NewMessage(from_users=your_id))
-    async def handle_text(event):
-        if event.text.startswith("/"):
-            return
-        state = waiting_for.get(your_id)
-        if state == "add":
-            channel = event.text.strip()
-            channels = load_channels()
-            if channel in channels:
-                await bot.send_message(your_id, f"Канал {channel} уже есть в списке.", buttons=main_menu())
-            else:
-                channels.append(channel)
-                save_channels(channels)
-                await bot.send_message(your_id, f"✅ Канал {channel} добавлен.", buttons=main_menu())
-            waiting_for.pop(your_id, None)
-
-    # Обработка нажатий на кнопки
-    @bot.on(events.CallbackQuery())
-    async def handle_callback(event):
-        if event.sender_id != your_id:
-            return
-        data = event.data
-
-        if data == b"digest":
-            await event.answer("Собираю дайджест...")
-            await bot.send_message(your_id, "⏳ Собираю дайджест...")
-            digest = await build_digest()
-            if digest:
-                await bot.send_message(your_id, digest, parse_mode='html', link_preview=False, buttons=main_menu())
-            else:
-                await bot.send_message(your_id, "Новых постов нет.", buttons=main_menu())
-
-        elif data == b"add":
-            await event.answer()
-            waiting_for[your_id] = "add"
-            await bot.send_message(your_id, "Напиши @username канала который хочешь добавить:")
-
-        elif data == b"list":
-            await event.answer()
-            channels = load_channels()
-            if not channels:
-                await bot.send_message(your_id, "Список каналов пуст.", buttons=main_menu())
-            else:
-                text = "📌 Мои каналы:\n" + "\n".join(f"• {ch}" for ch in channels)
-                await bot.send_message(your_id, text, buttons=main_menu())
-
-        elif data == b"remove":
-            await event.answer()
-            channels = load_channels()
-            if not channels:
-                await bot.send_message(your_id, "Список каналов пуст.", buttons=main_menu())
-                return
-            # Показываем каждый канал как кнопку для удаления
-            buttons = [[Button.inline(f"🗑 {ch}", f"del:{ch}".encode())] for ch in channels]
-            buttons.append([Button.inline("« Назад", b"back")])
-            await bot.send_message(your_id, "Выбери канал для удаления:", buttons=buttons)
-
-        elif data.startswith(b"del:"):
-            channel = data[4:].decode()
-            channels = load_channels()
-            if channel in channels:
-                channels.remove(channel)
-                save_channels(channels)
-                await event.answer(f"Удалён: {channel}")
-                await bot.send_message(your_id, f"🗑 Канал {channel} удалён.", buttons=main_menu())
-            else:
-                await event.answer("Канал не найден")
-
-        elif data == b"back":
-            await event.answer()
-            await bot.send_message(your_id, "Выбери действие:", buttons=main_menu())
-
+    print("Telethon клиент запущен.")
     print("Бот запущен.")
-    await bot.run_until_disconnected()
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
